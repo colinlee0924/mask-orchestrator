@@ -277,16 +277,27 @@ async def stream_from_orchestrator_sse(
         }
         return f"data: {json.dumps(data)}\n\n"
 
+    def find_marker_position(text: str, markers: list) -> int:
+        """Find the last position of any marker in text. Returns -1 if not found."""
+        last_pos = -1
+        for marker in markers:
+            pos = text.rfind(marker)
+            if pos > last_pos:
+                last_pos = pos
+        return last_pos
+
     def check_markers(text: str) -> tuple[bool, bool]:
         """Check if text contains thinking or summary markers.
-        Returns (is_thinking, is_summary)
+        Returns (is_thinking, is_summary) based on which appears LAST in text.
         """
-        for marker in THINKING_MARKERS:
-            if marker in text:
-                return (True, False)
-        for marker in SUMMARY_MARKERS:
-            if marker in text:
-                return (False, True)
+        thinking_pos = find_marker_position(text, THINKING_MARKERS)
+        summary_pos = find_marker_position(text, SUMMARY_MARKERS)
+
+        # If summary marker appears after thinking marker, we're in summary mode
+        if summary_pos > thinking_pos:
+            return (False, True)
+        elif thinking_pos >= 0:
+            return (True, False)
         return (False, False)
 
     stream_url = f"{ORCHESTRATOR_URL}/api/stream"
