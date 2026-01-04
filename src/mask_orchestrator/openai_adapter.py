@@ -235,6 +235,204 @@ async def send_to_orchestrator(message: str) -> str:
         return json.dumps(result)
 
 
+async def stream_from_orchestrator_sse(
+    message: str,
+    model: str,
+    session_id: Optional[str] = None,
+) -> AsyncGenerator[str, None]:
+    """Stream response from orchestrator SSE endpoint in OpenAI format.
+
+    Connects to the /api/stream SSE endpoint and converts AgentEvents
+    to OpenAI streaming format. Uses intelligent formatting:
+    - Wraps thinking/reasoning in <think> tags for collapsible rendering
+    - Shows tool calls with status indicators
+    - Only final answer is visible outside <think> block
+    """
+    response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+    created = int(time.time())
+
+    # Track state for smart formatting
+    in_think_block = False
+    tool_calls_count = 0
+    has_content = False
+    buffer = ""  # Buffer to detect section markers
+    found_summary = False  # Track if we've seen the summary section
+
+    # Markers that indicate the final answer section
+    SUMMARY_MARKERS = ["**結果摘要:**", "**結果摘要：**", "結果摘要:", "Final Answer:", "Answer:"]
+    THINKING_MARKERS = ["**思考過程:**", "**思考過程：**", "思考過程:", "Thinking:"]
+
+    def make_chunk(content: str, finish_reason: Optional[str] = None) -> str:
+        """Create an OpenAI-format SSE chunk."""
+        data = {
+            "id": response_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "delta": {"content": content} if content else {},
+                "finish_reason": finish_reason
+            }]
+        }
+        return f"data: {json.dumps(data)}\n\n"
+
+    def check_markers(text: str) -> tuple[bool, bool]:
+        """Check if text contains thinking or summary markers.
+        Returns (is_thinking, is_summary)
+        """
+        for marker in THINKING_MARKERS:
+            if marker in text:
+                return (True, False)
+        for marker in SUMMARY_MARKERS:
+            if marker in text:
+                return (False, True)
+        return (False, False)
+
+    stream_url = f"{ORCHESTRATOR_URL}/api/stream"
+
+    # Build request body, only include session_id if provided
+    request_body = {"message": message}
+    if session_id:
+        request_body["session_id"] = session_id
+
+    try:
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream(
+                "POST",
+                stream_url,
+                json=request_body,
+            ) as response:
+                response.raise_for_status()
+
+                async for line in response.aiter_lines():
+                    if not line:
+                        continue
+
+                    # Parse SSE event
+                    if line.startswith("event:"):
+                        continue
+
+                    if line.startswith("data:"):
+                        data_str = line[5:].strip()
+                        if not data_str or data_str == "[DONE]":
+                            continue
+
+                        try:
+                            event_data = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            continue
+
+                        event_type = event_data.get("type", "")
+                        event_name = event_data.get("name", "")
+                        data = event_data.get("data", {})
+
+                        # Handle different event types
+                        if event_type == "agent_start":
+                            pass
+
+                        elif event_type == "tool_call_start":
+                            tool_calls_count += 1
+                            tool_input = data.get("input", {})
+                            input_preview = json.dumps(tool_input, ensure_ascii=False)[:200]
+
+                            if not in_think_block:
+                                yield make_chunk("<think>\n")
+                                in_think_block = True
+
+                            yield make_chunk(
+                                f"🔧 **{event_name}** executing...\n"
+                                f"```json\n{input_preview}\n```\n\n"
+                            )
+
+                        elif event_type == "tool_call_end":
+                            tool_output = data.get("output", "")
+                            output_preview = tool_output[:500]
+                            if len(tool_output) > 500:
+                                output_preview += "..."
+
+                            yield make_chunk(
+                                f"✅ **{event_name}** done\n"
+                                f"```\n{output_preview}\n```\n\n"
+                            )
+
+                        elif event_type == "text_delta":
+                            delta = data.get("delta", "")
+                            if delta:
+                                has_content = True
+                                buffer += delta
+
+                                # Check for section markers
+                                is_thinking, is_summary = check_markers(buffer)
+
+                                if is_thinking and not in_think_block:
+                                    # Start of thinking section - open think block
+                                    yield make_chunk("<think>\n")
+                                    in_think_block = True
+                                    yield make_chunk(delta)
+
+                                elif is_summary and in_think_block:
+                                    # Found summary - close think block first
+                                    yield make_chunk("\n</think>\n\n")
+                                    in_think_block = False
+                                    found_summary = True
+                                    # Strip the marker from output, just show the content
+                                    yield make_chunk(delta)
+
+                                elif is_summary and not in_think_block:
+                                    # Summary without prior thinking
+                                    found_summary = True
+                                    yield make_chunk(delta)
+
+                                elif in_think_block:
+                                    # Inside thinking block
+                                    yield make_chunk(delta)
+
+                                else:
+                                    # No markers yet - start a think block for initial content
+                                    if not found_summary:
+                                        yield make_chunk("<think>\n")
+                                        in_think_block = True
+                                    yield make_chunk(delta)
+
+                        elif event_type == "agent_end":
+                            # Close any open think block
+                            if in_think_block:
+                                yield make_chunk("\n</think>\n\n")
+                                in_think_block = False
+
+                        elif event_type == "error":
+                            error_msg = data.get("message", "Unknown error")
+                            if in_think_block:
+                                yield make_chunk("\n</think>\n\n")
+                                in_think_block = False
+                            yield make_chunk(f"\n❌ Error: {error_msg}\n")
+
+        # If no content was emitted from streaming, fall back to A2A
+        if not has_content:
+            raw_response = await send_to_orchestrator(message)
+            formatted = format_response_with_details(raw_response)
+            yield make_chunk(formatted)
+
+        # Send final chunk
+        yield make_chunk("", finish_reason="stop")
+        yield "data: [DONE]\n\n"
+
+    except httpx.ConnectError:
+        # Fallback: try A2A endpoint if SSE not available
+        yield make_chunk("⚠️ SSE streaming unavailable, using fallback...\n")
+        raw_response = await send_to_orchestrator(message)
+        formatted = format_response_with_details(raw_response)
+        yield make_chunk(formatted)
+        yield make_chunk("", finish_reason="stop")
+        yield "data: [DONE]\n\n"
+
+    except Exception as e:
+        yield make_chunk(f"\n❌ Stream error: {str(e)}\n")
+        yield make_chunk("", finish_reason="stop")
+        yield "data: [DONE]\n\n"
+
+
 async def stream_response(content: str, model: str) -> AsyncGenerator[str, None]:
     """Stream response in SSE format.
 
@@ -363,7 +561,18 @@ async def chat_completions(request: ChatCompletionRequest):
             else:
                 full_message = last_message
 
-            # Send to orchestrator
+            # For streaming requests, use SSE directly (skip A2A call)
+            if request.stream:
+                span.set_attribute("stream.mode", "sse")
+                return StreamingResponse(
+                    stream_from_orchestrator_sse(
+                        message=full_message,
+                        model=request.model,
+                    ),
+                    media_type="text/event-stream",
+                )
+
+            # Non-streaming: use A2A protocol
             with tracer.start_as_current_span("call_orchestrator") as orch_span:
                 orch_span.set_attribute("orchestrator.url", ORCHESTRATOR_URL)
                 raw_response = await send_to_orchestrator(full_message)
@@ -379,13 +588,6 @@ async def chat_completions(request: ChatCompletionRequest):
                 fmt_span.set_attribute("format.transformed_response", response_content[:1000])
 
             span.set_attribute("output.response_length", len(response_content))
-
-            if request.stream:
-                # Return streaming response
-                return StreamingResponse(
-                    stream_response(response_content, request.model),
-                    media_type="text/event-stream",
-                )
 
             # Return non-streaming response
             response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"

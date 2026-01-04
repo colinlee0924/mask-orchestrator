@@ -24,11 +24,13 @@ classifiers = [
 ]
 
 dependencies = [
-    "mask-kernel[phoenix,anthropic] @ git+https://github.com/colinlee0924/mask-kernel.git",
+    # Use local mask-kernel for development (switch to git URL for production)
+    "mask-kernel[phoenix,anthropic] @ file:///Users/lizonglin/colin_ws/workspaces/ws_agentic_system/PROJECT_A/mask-kernel",
     "python-dotenv>=1.0.0",
     "httpx>=0.27.0",
     "fastapi>=0.109.0",
     "uvicorn>=0.27.0",
+    "sse-starlette>=2.0.0",
 ]
 
 [project.optional-dependencies]
