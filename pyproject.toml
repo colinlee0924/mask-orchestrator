@@ -27,6 +27,8 @@ dependencies = [
     "mask-kernel[phoenix,anthropic] @ git+https://github.com/colinlee0924/mask-kernel.git",
     "python-dotenv>=1.0.0",
     "httpx>=0.27.0",
+    "fastapi>=0.109.0",
+    "uvicorn>=0.27.0",
 ]
 
 [project.optional-dependencies]
@@ -45,6 +47,7 @@ Issues = "https://github.com/colinlee0924/mask-orchestrator/issues"
 
 [project.scripts]
 mask-orchestrator = "mask_orchestrator.main:main"
+mask-orchestrator-openai = "mask_orchestrator.openai_adapter:main"
 
 [tool.hatch.metadata]
 allow-direct-references = true
