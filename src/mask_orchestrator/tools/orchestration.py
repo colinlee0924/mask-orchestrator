@@ -22,10 +22,22 @@ def _fetch_agent_card(url: str) -> Optional[dict]:
     try:
         agent_url = url.rstrip("/")
         with httpx.Client(timeout=10.0) as client:
-            response = client.get(f"{agent_url}/agent")
+            # Try A2A standard endpoint first
+            response = client.get(f"{agent_url}/.well-known/agent.json")
             response.raise_for_status()
             return response.json()
-    except Exception as e:
+    except Exception:
+        # Fallback to root endpoint (some A2A servers return card at root)
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                response = client.get(agent_url)
+                if response.status_code == 200:
+                    data = response.json()
+                    # Check if this looks like an agent card
+                    if "name" in data and "description" in data:
+                        return data
+        except Exception:
+            pass
         return None
 
 
