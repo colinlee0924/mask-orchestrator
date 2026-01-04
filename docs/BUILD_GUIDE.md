@@ -640,3 +640,74 @@ A: 在 `orchestration.py` 中新增 `@tool` 裝飾的函數，並加入 `get_orc
 
 ### Q: Agent Card 端點不正確？
 A: A2A 標準使用 `/.well-known/agent.json`，程式已有 fallback 機制
+
+---
+
+## Open WebUI 整合
+
+### 概述
+
+`mask-orchestrator` 提供 OpenAI 相容的 API adapter，可以讓 Open WebUI 直接與多 Agent 系統互動。
+
+### 架構
+
+```
+┌─────────────────┐     ┌──────────────────┐     ┌─────────────────────┐
+│   Open WebUI    │────▶│  OpenAI Adapter  │────▶│  mask-orchestrator  │
+│   :3000         │     │     :8100        │     │       :10020        │
+└─────────────────┘     └──────────────────┘     └──────────┬──────────┘
+                                                           │ A2A
+                                                           ▼
+                                                 ┌─────────────────────┐
+                                                 │   jira-agent-mask   │
+                                                 │       :10010        │
+                                                 └─────────────────────┘
+```
+
+### 啟動 OpenAI Adapter
+
+```bash
+# 方法 1: 使用 script
+uv run mask-orchestrator-openai
+
+# 方法 2: 直接執行
+uv run python -m mask_orchestrator.openai_adapter
+```
+
+Adapter 會啟動在 port 8100，提供以下端點：
+- `GET /v1/models` - 列出可用模型
+- `POST /v1/chat/completions` - 聊天完成 (支援 streaming)
+- `GET /health` - 健康檢查
+
+### 配置 Open WebUI
+
+1. 開啟 Open WebUI Admin Console → Settings → Connections
+2. 在 OpenAI API 區塊點擊 "+" 新增連線
+3. 填入：
+   - **URL**: `http://host.docker.internal:8100/v1` (Docker 環境)
+   - **API Key**: 任意值 (adapter 不驗證)
+4. 點擊 "驗證連線" 確認成功
+5. 儲存設定
+
+### 使用方式
+
+1. 在 Open WebUI 主頁選擇模型 `mask-orchestrator`
+2. 開始對話，例如：
+   - "Discover agents at http://localhost:10010"
+   - "Send a task to jira-agent-mask asking what tools it has"
+   - "List all discovered agents"
+
+### 環境變數
+
+```bash
+# OpenAI Adapter 設定
+ADAPTER_PORT=8100                    # Adapter 監聽 port
+ORCHESTRATOR_URL=http://localhost:10020  # Orchestrator A2A 端點
+ADAPTER_TIMEOUT=120                  # 請求逾時秒數
+```
+
+### 注意事項
+
+1. **確保 Orchestrator 已啟動**：Adapter 需要連接到 orchestrator
+2. **Docker 網路**：Open WebUI 在 Docker 中時使用 `host.docker.internal`
+3. **多輪對話**：Adapter 會將對話歷史傳送給 orchestrator 保持上下文
