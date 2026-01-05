@@ -1,5 +1,6 @@
 """Orchestration tools for multi-agent coordination."""
 
+import os
 import uuid
 from typing import Dict, List, Optional
 
@@ -8,6 +9,33 @@ from langchain_core.tools import tool
 
 # Global registry to store discovered agents
 _agent_registry: Dict[str, dict] = {}
+_auto_discovered: bool = False
+
+
+def _auto_discover_from_env() -> None:
+    """Auto-discover agents from REMOTE_AGENT_URLS environment variable."""
+    global _agent_registry, _auto_discovered
+
+    if _auto_discovered:
+        return
+
+    _auto_discovered = True
+    remote_urls = os.environ.get("REMOTE_AGENT_URLS", "")
+    if not remote_urls:
+        return
+
+    url_list = [u.strip() for u in remote_urls.split(",") if u.strip()]
+    for url in url_list:
+        card = _fetch_agent_card(url)
+        if card:
+            agent_name = card.get("name", "unknown")
+            _agent_registry[agent_name] = {
+                "url": url,
+                "card": card,
+            }
+            print(f"Auto-discovered agent: {agent_name} at {url}")
+        else:
+            print(f"Failed to auto-discover agent at {url}")
 
 
 def _fetch_agent_card(url: str) -> Optional[dict]:
@@ -200,9 +228,14 @@ def broadcast_task(task: str) -> str:
 def get_orchestration_tools() -> List:
     """Get all orchestration tools.
 
+    Also triggers auto-discovery of agents from REMOTE_AGENT_URLS.
+
     Returns:
         List of orchestration tool functions
     """
+    # Auto-discover agents from environment
+    _auto_discover_from_env()
+
     return [
         discover_agents,
         list_all_agents,

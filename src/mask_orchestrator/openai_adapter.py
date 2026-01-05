@@ -262,6 +262,10 @@ async def stream_from_orchestrator_sse(
     SUMMARY_MARKERS = ["**結果摘要:**", "**結果摘要：**", "結果摘要:", "Final Answer:", "Answer:"]
     THINKING_MARKERS = ["**思考過程:**", "**思考過程：**", "思考過程:", "Thinking:"]
 
+    # Patterns to strip from output after summary marker (handles split markers)
+    import re
+    MARKER_CLEANUP_PATTERN = re.compile(r'^[\*]*[結果摘要:：\*\s]*')
+
     def make_chunk(content: str, finish_reason: Optional[str] = None) -> str:
         """Create an OpenAI-format SSE chunk."""
         data = {
@@ -387,13 +391,24 @@ async def stream_from_orchestrator_sse(
                                     yield make_chunk("\n</think>\n\n")
                                     in_think_block = False
                                     found_summary = True
-                                    # Strip the marker from output, just show the content
-                                    yield make_chunk(delta)
+                                    # Strip marker pattern from this delta (handles split markers)
+                                    # e.g., "果摘要:**\n內容" -> "內容"
+                                    cleaned = MARKER_CLEANUP_PATTERN.sub('', delta).lstrip('\n')
+                                    if cleaned:
+                                        yield make_chunk(cleaned)
 
                                 elif is_summary and not in_think_block:
-                                    # Summary without prior thinking
-                                    found_summary = True
-                                    yield make_chunk(delta)
+                                    # Summary without prior thinking, or continuing after summary
+                                    if not found_summary:
+                                        # First time seeing summary marker
+                                        found_summary = True
+                                        # Strip any marker remnants
+                                        cleaned = MARKER_CLEANUP_PATTERN.sub('', delta).lstrip('\n')
+                                        if cleaned:
+                                            yield make_chunk(cleaned)
+                                    else:
+                                        # Already past summary, yield normally
+                                        yield make_chunk(delta)
 
                                 elif in_think_block:
                                     # Inside thinking block
